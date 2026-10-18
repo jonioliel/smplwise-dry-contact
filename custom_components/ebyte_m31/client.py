@@ -1,8 +1,8 @@
-"""Small, asynchronous, read-only Modbus TCP client for EBYTE M31-U.
+"""Small, asynchronous, read-only Modbus TCP client for EBYTE M31/M31-U.
 
 This module has no Home Assistant dependencies. Only FC02 and FC03 are exposed.
-Register addresses come from the M31-U Series V1.4 user manual, sections
-4.10.1, 4.10.6 and 4.10.7; addresses on the wire are zero based.
+Register addresses come from M31-U V1.4 sections 4.10.1/4.10.6/4.10.7 and
+M31 Series V1.1-EN sections 4.8.1/4.8.5; addresses on the wire are zero based.
 """
 
 from __future__ import annotations
@@ -19,6 +19,14 @@ MODULE_REGISTER = 0x0C80
 FAULT_REGISTER = 0x7587
 # Only documented M31-U channel encodings are accepted (A means 16).
 CHANNEL_COUNTS = {str(value): value for value in range(10)} | {"A": 16}
+# The older series documents DI/health/MAC registers, but no model inventory.
+LEGACY_MODELS = {
+    "M31-AAAX4440G": 4,
+    "M31-AXXX8000G": 8,
+    "M31-AXAX4040G": 4,
+    "M31-AXXXA000G": 16,
+    "M31-AXAX8080G": 8,
+}
 
 
 class M31Error(Exception):
@@ -38,6 +46,10 @@ class UnsupportedModel(M31Error):
     """The number of inputs cannot be determined from this model."""
 
 
+class ModelRequired(UnsupportedModel):
+    """The controller has no usable model register; ask for its model."""
+
+
 @dataclass(frozen=True)
 class ControllerInfo:
     """Stable controller identity and the configured DI count."""
@@ -47,6 +59,7 @@ class ControllerInfo:
     mac: str | None = None
     firmware: str | None = None
     modules: tuple[str, ...] = ()
+    family: str = "m31_u"
 
 
 def decode_string(registers: tuple[int, ...]) -> str:
@@ -57,10 +70,12 @@ def decode_string(registers: tuple[int, ...]) -> str:
 
 def inputs_for_model(model: str) -> int:
     """Get the host's DI count, without double-counting its internal slave."""
+    if model.upper() in LEGACY_MODELS:
+        return LEGACY_MODELS[model.upper()]
     # e.g. M31-AXXXA000G-U (16DI), M31-AXEX8080G-U (8DI).
     match = re.fullmatch(r"M31-[A-Z]{4}([0-9A]{4})G-U", model.upper())
     if match is None:
-        raise UnsupportedModel(f"Unsupported M31-U host model: {model!r}")
+        raise UnsupportedModel(f"Unsupported M31 host model: {model!r}")
     count = CHANNEL_COUNTS[match[1][0]]
     if count == 0:
         raise UnsupportedModel(f"The host {model} has no digital inputs")
@@ -207,7 +222,9 @@ class M31Client:
             return ()
         return tuple(modules)
 
-    async def identify(self, input_count: int = 0) -> ControllerInfo:
+    async def identify(
+        self, input_count: int = 0, model_hint: str | None = None
+    ) -> ControllerInfo:
         """Identify the host and validate its DI range with an actual read.
 
         An explicit input count includes all expansion inputs in bus order.
@@ -216,18 +233,36 @@ class M31Client:
         """
         if not 0 <= input_count <= 512:
             raise ValueError("Invalid input count override")
-        try:
-            model = decode_string(await self.read_registers(MODEL_REGISTER, 12))
-        except ModbusError as err:
-            if err.code not in (1, 2) or not input_count:
-                raise
-            model = "M31 (manual)"
+        if model_hint:
+            model = model_hint.strip().upper()
+            if model not in LEGACY_MODELS:
+                raise UnsupportedModel(f"Unsupported selected M31 model: {model!r}")
+        else:
+            try:
+                model = decode_string(await self.read_registers(MODEL_REGISTER, 12))
+            except ModbusError as err:
+                if err.code not in (1, 2):
+                    raise
+                if not input_count:
+                    raise ModelRequired(
+                        "Select the M31 model printed on the controller"
+                    ) from err
+                model = "M31 (manual)"
+            # Some older firmware returns zero-filled metadata instead of an error.
+            if not model:
+                if not input_count:
+                    raise ModelRequired(
+                        "Select the M31 model printed on the controller"
+                    )
+                model = "M31 (manual)"
+        legacy = model.upper() in LEGACY_MODELS
         modules = ()
         if input_count:
             count = input_count
         else:
             host_count = inputs_for_model(model)
-            modules = await self._identify_modules()
+            # The older manual does not define these M31-U inventory registers.
+            modules = () if legacy else await self._identify_modules()
             if modules:
                 # Confirm slot 0 is the internal card described by the host model.
                 internal = re.sub(r"^(?:M31-)?G", "", modules[0].upper())
@@ -241,7 +276,10 @@ class M31Client:
                 count = host_count
         mac = None
         firmware = None
-        for address, size in ((MAC_REGISTER, 3), (FIRMWARE_REGISTER, 8)):
+        metadata = [(MAC_REGISTER, 3)]
+        if not legacy and model != "M31 (manual)":
+            metadata.append((FIRMWARE_REGISTER, 8))
+        for address, size in metadata:
             try:
                 registers = await self.read_registers(address, size)
             except ModbusError as err:
@@ -255,4 +293,5 @@ class M31Client:
             else:
                 firmware = decode_string(registers) or None
         await self.read_state(count)
-        return ControllerInfo(model, count, mac, firmware, modules)
+        family = "m31" if legacy else "manual" if model == "M31 (manual)" else "m31_u"
+        return ControllerInfo(model, count, mac, firmware, modules, family)

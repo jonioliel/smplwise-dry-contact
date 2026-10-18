@@ -27,11 +27,83 @@ INFO = client_api.ControllerInfo(
 
 
 class FlowTests(unittest.IsolatedAsyncioTestCase):
+    async def test_legacy_model_is_saved_with_connection(self):
+        flow = flow_api.M31ConfigFlow()
+        data = {"host": "192.168.99.99", "model": "M31-AXXXA000G"}
+        with patch.object(flow_api, "_probe", AsyncMock(return_value=INFO)) as probe:
+            result = await flow.async_step_user(data)
+        self.assertEqual(result["data"]["model"], "M31-AXXXA000G")
+        self.assertEqual(probe.await_args.args[0]["model"], "M31-AXXXA000G")
+
+    async def test_missing_model_register_prompts_for_model(self):
+        flow = flow_api.M31ConfigFlow()
+        with patch.object(
+            flow_api,
+            "_probe",
+            AsyncMock(side_effect=client_api.ModelRequired("select")),
+        ):
+            result = await flow.async_step_user({"host": "192.168.99.99"})
+        self.assertEqual(result["errors"], {"model": "model_required"})
+        self.assertEqual(
+            result["data_schema"]({"host": "192.168.99.99", "model": "M31-AXXXA000G"})[
+                "model"
+            ],
+            "M31-AXXXA000G",
+        )
+
+    async def test_probe_passes_legacy_model_hint(self):
+        client = Mock(identify=AsyncMock(return_value=INFO))
+        with patch.object(flow_api, "M31Client", return_value=client):
+            await flow_api._probe(
+                {
+                    "host": "192.168.99.99",
+                    "port": 502,
+                    "unit_id": 1,
+                    "model": "M31-AXXX8000G",
+                },
+                24,
+            )
+        client.identify.assert_awaited_once_with(24, model_hint="M31-AXXX8000G")
+        client.close.assert_called_once()
+
+    async def test_reconfigure_retains_selected_legacy_model(self):
+        flow = flow_api.M31ConfigFlow()
+        flow.entry = ha_fakes.Entry(
+            data={
+                "host": "192.168.99.99",
+                "port": 502,
+                "unit_id": 1,
+                "model": "M31-AXXXA000G",
+            }
+        )
+        with patch.object(flow_api, "_probe", AsyncMock(return_value=INFO)) as probe:
+            result = await flow.async_step_reconfigure({"host": "192.168.99.100"})
+        self.assertEqual(result["reason"], "reconfigure_successful")
+        self.assertEqual(flow.entry.data["model"], "M31-AXXXA000G")
+        self.assertEqual(probe.await_args.args[0]["model"], "M31-AXXXA000G")
+
+    async def test_reconfigure_can_clear_a_model_hint(self):
+        flow = flow_api.M31ConfigFlow()
+        flow.entry = ha_fakes.Entry(
+            data={
+                "host": "192.168.99.99",
+                "port": 502,
+                "unit_id": 1,
+                "model": "M31-AXXXA000G",
+            }
+        )
+        with patch.object(flow_api, "_probe", AsyncMock(return_value=INFO)):
+            await flow.async_step_reconfigure(
+                {"host": "192.168.99.99", "model": "auto"}
+            )
+        self.assertNotIn("model", flow.entry.data)
+
     async def test_initial_form_and_ip_only_success(self):
         flow = flow_api.M31ConfigFlow()
         form = await flow.async_step_user()
         self.assertEqual(
-            form["data_schema"]({"host": "192.168.99.99"}), {"host": "192.168.99.99"}
+            form["data_schema"]({"host": "192.168.99.99"}),
+            {"host": "192.168.99.99", "model": "auto"},
         )
         with patch.object(flow_api, "_probe", AsyncMock(return_value=INFO)) as probe:
             result = await flow.async_step_user({"host": "192.168.99.99"})
@@ -201,6 +273,13 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
         for callback in self.entry.callbacks:
             callback()
         self.client.close.assert_called_once()
+
+    async def test_startup_reuses_saved_legacy_model(self):
+        self.entry.data["model"] = "M31-AXXXA000G"
+        with patch.object(entrypoint, "M31Client", return_value=self.client):
+            await entrypoint.async_setup_entry(self.hass, self.entry)
+        self.client.identify.assert_awaited_once_with(0, model_hint="M31-AXXXA000G")
+        self.client.close()
 
     async def test_identification_failure_is_retryable_and_closes_socket(self):
         self.client.identify.side_effect = client_api.M31Error("offline")

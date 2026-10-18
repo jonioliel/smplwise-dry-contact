@@ -23,6 +23,7 @@ def main() -> None:
             ROOT / "README.md",
             ROOT / "LICENSE",
             ROOT / "PUBLISHING.md",
+            ROOT / "CHANGELOG.md",
         ]:
             archive.write(path, path.relative_to(ROOT).as_posix())
     print(target)
@@ -39,6 +40,7 @@ def main() -> None:
         for name in (
             "README.md",
             "PUBLISHING.md",
+            "CHANGELOG.md",
             "LICENSE",
             "hacs.json",
             "requirements-dev.txt",

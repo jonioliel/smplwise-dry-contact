@@ -65,6 +65,16 @@ class ModbusSimulator:
             model = modules[index] if index < len(modules) else "NONE"
             self.set_registers(0x0C80 + index * 8, string_registers(model, 8))
 
+    def use_legacy_register_map(self, input_count=16):
+        """Expose only registers documented by M31 Series V1.1-EN."""
+        self.registers = {
+            address: value
+            for address, value in self.registers.items()
+            if 0x7534 <= address < 0x7537 or address == 0x7587
+        }
+        self.inputs = [False] * input_count
+        self.requests.clear()
+
     async def start(self):
         self.server = await asyncio.start_server(self.handle, "127.0.0.1", 0)
         self.port = self.server.sockets[0].getsockname()[1]

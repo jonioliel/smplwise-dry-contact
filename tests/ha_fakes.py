@@ -79,8 +79,12 @@ class Flow:
     def async_abort(self, reason):
         return {"type": "abort", "reason": reason}
 
-    def async_update_reload_and_abort(self, entry, *, data_updates, title):
-        entry.data = {**entry.data, **data_updates}
+    def async_update_reload_and_abort(
+        self, entry, *, data=None, data_updates=None, title
+    ):
+        entry.data = (
+            dict(data) if data is not None else {**entry.data, **(data_updates or {})}
+        )
         entry.title = title
         return self.async_abort(reason="reconfigure_successful")
 

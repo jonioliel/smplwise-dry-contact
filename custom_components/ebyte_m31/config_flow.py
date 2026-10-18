@@ -12,16 +12,25 @@ from homeassistant.const import CONF_HOST, CONF_PORT, CONF_SCAN_INTERVAL
 from homeassistant.core import callback
 from homeassistant.data_entry_flow import FlowResult
 
-from .client import ControllerInfo, M31Client, M31Error, UnsupportedModel
+from .client import (
+    LEGACY_MODELS,
+    ControllerInfo,
+    M31Client,
+    M31Error,
+    ModelRequired,
+    UnsupportedModel,
+)
 from .const import (
     CONF_INPUT_COUNT,
     CONF_INVERTED_INPUTS,
+    CONF_MODEL,
     CONF_UNIT_ID,
     DEFAULT_PORT,
     DEFAULT_SCAN_INTERVAL,
     DEFAULT_UNIT_ID,
     DOMAIN,
     MAX_INPUTS,
+    MODEL_AUTO,
     NAME,
 )
 
@@ -29,7 +38,12 @@ from .const import (
 def _connection_schema(
     defaults: dict[str, Any], advanced: bool, include_count: bool = False
 ) -> vol.Schema:
-    fields = {vol.Required(CONF_HOST, default=defaults.get(CONF_HOST, "")): str}
+    fields = {
+        vol.Required(CONF_HOST, default=defaults.get(CONF_HOST, "")): str,
+        vol.Required(CONF_MODEL, default=defaults.get(CONF_MODEL, MODEL_AUTO)): vol.In(
+            [MODEL_AUTO, *LEGACY_MODELS]
+        ),
+    }
     if advanced:
         fields.update(
             {
@@ -55,18 +69,24 @@ async def _probe(connection: dict[str, Any], input_count: int = 0) -> Controller
         connection[CONF_HOST], connection[CONF_PORT], connection[CONF_UNIT_ID]
     )
     try:
-        return await client.identify(input_count)
+        return await client.identify(input_count, model_hint=connection.get(CONF_MODEL))
     finally:
         client.close()
 
 
 def _connection(data: dict[str, Any]) -> dict[str, Any]:
     """Validate an IPv4/IPv6 address and normalize its representation."""
-    return {
+    connection = {
         CONF_HOST: str(ipaddress.ip_address(data[CONF_HOST].strip().strip("[]"))),
         CONF_PORT: data.get(CONF_PORT, DEFAULT_PORT),
         CONF_UNIT_ID: data.get(CONF_UNIT_ID, DEFAULT_UNIT_ID),
     }
+    model = data.get(CONF_MODEL, MODEL_AUTO)
+    if model != MODEL_AUTO:
+        if model not in LEGACY_MODELS:
+            raise UnsupportedModel(f"Unsupported selected model: {model}")
+        connection[CONF_MODEL] = model
+    return connection
 
 
 class M31ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -96,6 +116,8 @@ class M31ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 self._async_abort_entries_match(connection)
                 try:
                     info = await _probe(connection, user_input.get(CONF_INPUT_COUNT, 0))
+                except ModelRequired:
+                    errors[CONF_MODEL] = "model_required"
                 except UnsupportedModel:
                     errors["base"] = "unsupported_model"
                 except M31Error:
@@ -113,7 +135,7 @@ class M31ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             errors=errors,
             data_schema=_connection_schema(
                 defaults,
-                self.show_advanced_options or "unsupported_model" in errors.values(),
+                self.show_advanced_options or bool(errors),
                 include_count=True,
             ),
         )
@@ -126,7 +148,14 @@ class M31ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         errors = {}
         if user_input is not None:
             try:
-                connection = _connection(user_input)
+                connection = _connection(
+                    {
+                        **user_input,
+                        CONF_MODEL: user_input.get(
+                            CONF_MODEL, entry.data.get(CONF_MODEL, MODEL_AUTO)
+                        ),
+                    }
+                )
             except ValueError:
                 errors[CONF_HOST] = "invalid_host"
             else:
@@ -143,6 +172,8 @@ class M31ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     info = await _probe(
                         connection, entry.options.get(CONF_INPUT_COUNT, 0)
                     )
+                except ModelRequired:
+                    errors[CONF_MODEL] = "model_required"
                 except UnsupportedModel:
                     errors["base"] = "unsupported_model"
                 except M31Error:
@@ -162,7 +193,7 @@ class M31ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     ):
                         title = f"{NAME} {connection[CONF_HOST]}"
                     return self.async_update_reload_and_abort(
-                        entry, data_updates=connection, title=title
+                        entry, data=connection, title=title
                     )
         return self.async_show_form(
             step_id="reconfigure",

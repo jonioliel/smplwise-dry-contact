@@ -16,6 +16,11 @@ class ModelTests(unittest.TestCase):
             ("M31-AXXX8000G-U", 8),
             ("M31-AXEX8080G-U", 8),
             ("M31-AFAX4440G-U", 4),
+            ("M31-AXXXA000G", 16),
+            ("M31-AXXX8000G", 8),
+            ("M31-AXAX4040G", 4),
+            ("M31-AXAX8080G", 8),
+            ("M31-AAAX4440G", 4),
         ):
             with self.subTest(model=model):
                 self.assertEqual(api.inputs_for_model(model), count)
@@ -23,7 +28,7 @@ class ModelTests(unittest.TestCase):
     def test_unknown_or_output_only_host_is_rejected(self):
         for model in (
             "unknown",
-            "M31-AXXXA000G",
+            "M31-AXXXA000G-CAN",
             "M31-AXXXA000G-U-PN",
             "M31-XXAX00A0G-U",
         ):
@@ -96,7 +101,7 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_manual_count_allows_firmware_without_model_register(self):
         del self.server.registers[0x0C20]
-        with self.assertRaises(api.ModbusError):
+        with self.assertRaises(api.ModelRequired):
             await self.client.identify()
         self.assertEqual((await self.client.identify(16)).model, "M31 (manual)")
 
@@ -234,3 +239,93 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
         info = await self.client.identify()
         self.assertEqual(info.input_count, 8)
         self.assertEqual(self.server.requests[0], (1, 3, 0x0C20, 12))
+
+    async def test_legacy_selection_uses_only_documented_registers(self):
+        self.server.use_legacy_register_map()
+        info = await self.client.identify(model_hint="M31-AXXXA000G")
+        self.assertEqual(info.model, "M31-AXXXA000G")
+        self.assertEqual(info.family, "m31")
+        self.assertEqual(info.input_count, 16)
+        self.assertEqual(info.mac, "02:11:22:33:44:55")
+        self.assertIsNone(info.firmware)
+        self.assertEqual(info.modules, ())
+        self.assertEqual(
+            self.server.requests,
+            [
+                (1, 3, 0x7534, 3),
+                (1, 3, 0x7587, 1),
+                (1, 2, 0, 16),
+            ],
+        )
+
+    async def test_each_documented_legacy_di_model(self):
+        for model, count in (
+            ("M31-AAAX4440G", 4),
+            ("M31-AXAX4040G", 4),
+            ("M31-AXXX8000G", 8),
+            ("M31-AXAX8080G", 8),
+            ("M31-AXXXA000G", 16),
+        ):
+            with self.subTest(model=model):
+                self.server.use_legacy_register_map(count)
+                info = await self.client.identify(model_hint=model)
+                self.assertEqual(info.input_count, count)
+                self.assertEqual(self.server.requests[-1], (1, 2, 0, count))
+
+    async def test_legacy_auto_requests_model_selection(self):
+        self.server.use_legacy_register_map()
+        with self.assertRaises(api.ModelRequired):
+            await self.client.identify()
+        self.assertEqual(self.server.requests, [(1, 3, 0x0C20, 12)])
+
+    async def test_zero_filled_model_requests_selection(self):
+        self.server.set_registers(0x0C20, (0,) * 12)
+        with self.assertRaises(api.ModelRequired):
+            await self.client.identify()
+
+    async def test_legacy_named_by_newer_firmware_is_accepted(self):
+        self.server.use_legacy_register_map(8)
+        self.server.set_registers(0x0C20, string_registers("M31-AXXX8000G", 12))
+        info = await self.client.identify()
+        self.assertEqual(info.model, "M31-AXXX8000G")
+        self.assertEqual(info.family, "m31")
+        self.assertEqual(info.input_count, 8)
+        self.assertFalse(
+            any(
+                address in (0x0C80, 0x0C2C) for _, _, address, _ in self.server.requests
+            )
+        )
+
+    async def test_legacy_expansions_use_explicit_total(self):
+        self.server.use_legacy_register_map(32)
+        info = await self.client.identify(32, model_hint="M31-AXXXA000G")
+        self.assertEqual(info.input_count, 32)
+        self.assertEqual(info.model, "M31-AXXXA000G")
+        self.assertEqual(self.server.requests[-1], (1, 2, 0, 32))
+
+    async def test_legacy_bit_states_and_io_faults(self):
+        self.server.use_legacy_register_map()
+        self.server.inputs[0] = self.server.inputs[15] = True
+        await self.client.identify(model_hint="M31-AXXXA000G")
+        states = await self.client.read_state(16)
+        self.assertEqual([i + 1 for i, state in enumerate(states) if state], [1, 16])
+        self.server.set_registers(0x7587, (2,))
+        with self.assertRaises(api.M31Error):
+            await self.client.read_state(16)
+
+    async def test_legacy_wrong_larger_model_is_rejected_by_input_read(self):
+        self.server.use_legacy_register_map(8)
+        with self.assertRaises(api.ModbusError):
+            await self.client.identify(model_hint="M31-AXXXA000G")
+
+    async def test_unsupported_model_hint_never_contacts_controller(self):
+        with self.assertRaises(api.UnsupportedModel):
+            await self.client.identify(model_hint="M31-AXXXA000G-PN")
+        self.assertEqual(self.server.connections, 0)
+
+    async def test_legacy_without_mac_uses_no_unsupported_metadata(self):
+        self.server.use_legacy_register_map()
+        del self.server.registers[0x7534]
+        info = await self.client.identify(model_hint="M31-AXXXA000G")
+        self.assertIsNone(info.mac)
+        self.assertEqual(info.input_count, 16)

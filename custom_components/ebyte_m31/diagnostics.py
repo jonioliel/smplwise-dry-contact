@@ -11,6 +11,7 @@ async def async_get_config_entry_diagnostics(
     coordinator = entry.runtime_data
     return {
         "model": coordinator.info.model,
+        "family": coordinator.info.family,
         "firmware": coordinator.info.firmware,
         "input_count": coordinator.info.input_count,
         "modules": list(coordinator.info.modules),
