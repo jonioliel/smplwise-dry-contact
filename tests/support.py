@@ -41,12 +41,17 @@ class ModbusSimulator:
 
     def __init__(self):
         self.inputs = [False] * 16
+        self.coils = [False] * 512
+        self.input_registers = {i: 0 for i in range(512)}
+        self.input_registers.update({0x0DAC + i: 0 for i in range(512)})
+        self.writes = []
         self.registers = {}
         self.set_registers(0x0C20, string_registers("M31-AXXXA000G-U", 12))
         self.set_registers(0x0C2C, string_registers("9232-0-13", 8))
         self.set_registers(0x7534, (0x0211, 0x2233, 0x4455))
         self.set_registers(0x7587, (0,))
         self.set_modules(["GAXXXA000-U"])
+        self.add_io_registers()
         self.requests = []
         self.writers = set()
         self.tasks = set()
@@ -74,6 +79,11 @@ class ModbusSimulator:
         }
         self.inputs = [False] * input_count
         self.requests.clear()
+        self.add_io_registers()
+
+    def add_io_registers(self):
+        for address in (0, 0x0DAC, 0x1194, 0x39A4):
+            self.set_registers(address, (0,) * 512)
 
     async def start(self):
         self.server = await asyncio.start_server(self.handle, "127.0.0.1", 0)
@@ -95,28 +105,48 @@ class ModbusSimulator:
         self.connections += 1
         try:
             while True:
-                request = await reader.readexactly(12)
-                transaction, protocol, length, unit, function, address, count = (
-                    struct.unpack(">HHHBBHH", request)
-                )
-                assert protocol == 0 and length == 6
-                assert function in (2, 3), (
-                    "Integration must never write to the controller"
-                )
+                header = await reader.readexactly(7)
+                transaction, protocol, length, unit = struct.unpack(">HHHB", header)
+                pdu_request = await reader.readexactly(length - 1)
+                request = header + pdu_request
+                function = pdu_request[0]
+                address, count = struct.unpack(">HH", pdu_request[1:5])
+                assert protocol == 0
                 self.requests.append((unit, function, address, count))
                 if self.delay:
                     await asyncio.sleep(self.delay)
-                if function == 2 and count <= len(self.inputs):
+                if function in (1, 2) and count <= len(
+                    self.coils if function == 1 else self.inputs
+                ):
+                    bits = self.coils if function == 1 else self.inputs
                     payload = bytearray((count + 7) // 8)
-                    for index, state in enumerate(self.inputs[:count]):
+                    for index, state in enumerate(bits[address : address + count]):
                         if state:
                             payload[index // 8] |= 1 << (index % 8)
-                    pdu = bytes((2, len(payload))) + payload
-                elif function == 3 and all(
-                    address + i in self.registers for i in range(count)
+                    pdu = bytes((function, len(payload))) + payload
+                elif function in (3, 4) and all(
+                    address + i
+                    in (self.registers if function == 3 else self.input_registers)
+                    for i in range(count)
                 ):
-                    values = [self.registers[address + i] for i in range(count)]
-                    pdu = bytes((3, count * 2)) + struct.pack(f">{count}H", *values)
+                    registers = (
+                        self.registers if function == 3 else self.input_registers
+                    )
+                    values = [registers[address + i] for i in range(count)]
+                    pdu = bytes((function, count * 2)) + struct.pack(
+                        f">{count}H", *values
+                    )
+                elif (
+                    function == 5 and address < len(self.coils) and count in (0, 0xFF00)
+                ):
+                    self.coils[address] = bool(count)
+                    self.writes.append((5, address, count))
+                    pdu = pdu_request
+                elif function == 16 and count == 1 and pdu_request[5] == 2:
+                    (value,) = struct.unpack(">H", pdu_request[6:8])
+                    self.registers[address] = value
+                    self.writes.append((16, address, value))
+                    pdu = bytes((16,)) + struct.pack(">HH", address, count)
                 else:
                     pdu = bytes((function | 0x80, 2))
                 response = (

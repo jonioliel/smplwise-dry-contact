@@ -21,6 +21,10 @@ class UpdateFailed(Exception):
     pass
 
 
+class HomeAssistantError(Exception):
+    pass
+
+
 class Entry:
     def __init__(
         self, data=None, options=None, unique_id="02:11:22:33:44:55", entry_id="entry"
@@ -103,6 +107,9 @@ class Coordinator:
         except UpdateFailed as err:
             raise ConfigEntryNotReady(str(err)) from err
 
+    async def async_request_refresh(self):
+        self.data = await self._async_update_data()
+
 
 class CoordinatorEntity:
     def __class_getitem__(cls, item):
@@ -129,14 +136,23 @@ def install():
             "CONF_HOST": "host",
             "CONF_PORT": "port",
             "CONF_SCAN_INTERVAL": "scan_interval",
-            "Platform": SimpleNamespace(BINARY_SENSOR="binary_sensor"),
+            "Platform": SimpleNamespace(
+                BINARY_SENSOR="binary_sensor",
+                SENSOR="sensor",
+                SWITCH="switch",
+                NUMBER="number",
+            ),
+            "UnitOfTemperature": SimpleNamespace(CELSIUS="°C"),
         },
         "homeassistant.core": {
             "callback": lambda function: function,
             "HomeAssistant": object,
         },
         "homeassistant.data_entry_flow": {"FlowResult": dict},
-        "homeassistant.exceptions": {"ConfigEntryNotReady": ConfigEntryNotReady},
+        "homeassistant.exceptions": {
+            "ConfigEntryNotReady": ConfigEntryNotReady,
+            "HomeAssistantError": HomeAssistantError,
+        },
         "homeassistant.helpers": {},
         "homeassistant.helpers.update_coordinator": {
             "DataUpdateCoordinator": Coordinator,
@@ -148,6 +164,20 @@ def install():
         "homeassistant.components": {},
         "homeassistant.components.binary_sensor": {
             "BinarySensorEntity": type("BinarySensorEntity", (), {})
+        },
+        "homeassistant.components.sensor": {
+            "SensorEntity": type("SensorEntity", (), {}),
+            "SensorDeviceClass": SimpleNamespace(
+                CURRENT="current", VOLTAGE="voltage", TEMPERATURE="temperature"
+            ),
+            "SensorStateClass": SimpleNamespace(MEASUREMENT="measurement"),
+        },
+        "homeassistant.components.switch": {
+            "SwitchEntity": type("SwitchEntity", (), {})
+        },
+        "homeassistant.components.number": {
+            "NumberEntity": type("NumberEntity", (), {}),
+            "NumberMode": SimpleNamespace(BOX="box"),
         },
     }
     for name, attributes in definitions.items():

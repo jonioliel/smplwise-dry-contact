@@ -7,7 +7,7 @@
 תיאור להדבקה ב־GitHub:
 
 ```text
-Home Assistant integration for EBYTE M31-U dry contact inputs by SMPLwise
+Local Home Assistant integration for EBYTE M31 / M31-U digital and analog IO by SMPLwise
 ```
 
 ## 1. יצירת המאגר
@@ -47,7 +47,7 @@ git push -u origin main
 
 במאגר GitHub פתח **Actions → Validate** ובדוק שהבדיקות עברו. הבדיקות כוללות HACS, Hassfest ובדיקות Python. אלה בדיקות בענן; הבדיקות המקומיות אינן מאשרות שעברו.
 
-לאחר מכן בחר **Releases → Draft a new release**. צור תגית **`v1.0.1`** ופרסם גרסה בשם **SMPLwise Dry Contact 1.0.1**. מספר הגרסה צריך להתאים לשדה `version` ב־`manifest.json`. אפשר לצרף את קובץ ההתקנה הידני `smplwise-dry-contact-1.0.1.zip`, אך HACS מוגדר כאן לקרוא את קובצי האינטגרציה מהמאגר עצמו, ללא תלות בקובץ המצורף.
+לאחר מכן בחר **Releases → Draft a new release**. צור תגית **`v1.2.0`** ופרסם גרסה בשם **SMPLwise Dry Contact 1.2.0**. מספר הגרסה צריך להתאים לשדה `version` ב־`manifest.json`. אפשר לצרף את קובץ ההתקנה הידני `smplwise-dry-contact-1.2.0.zip`, אך HACS מוגדר כאן לקרוא את קובצי האינטגרציה מהמאגר עצמו, ללא תלות בקובץ המצורף.
 
 פרסום Release מומלץ לקבלת מספרי גרסה ברורים. אפשר להוסיף ל־HACS גם מאגר תקין ללא Release; במקרה כזה הוא קורא מהענף המוגדר כברירת מחדל.
 

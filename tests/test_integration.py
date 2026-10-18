@@ -12,6 +12,7 @@ from tests.support import COMPONENT, load_part
 ha_fakes.install()
 flow_api = load_part("config_flow")
 client_api = load_part("client")
+io_api = load_part("io")
 coordinator_api = load_part("coordinator")
 sensor_api = load_part("binary_sensor")
 diagnostics_api = load_part("diagnostics")
@@ -27,6 +28,90 @@ INFO = client_api.ControllerInfo(
 
 
 class FlowTests(unittest.IsolatedAsyncioTestCase):
+    async def test_initial_setup_normalizes_and_saves_expansion_inventory(self):
+        flow = flow_api.M31ConfigFlow()
+        with patch.object(flow_api, "_probe", AsyncMock(return_value=INFO)) as probe:
+            result = await flow.async_step_user(
+                {
+                    "host": "192.168.99.99",
+                    "model": "M31-AAAX4440G",
+                    "expansion_models": "gxxax0080, M31-GXAXX0800",
+                }
+            )
+        expected = ["GXXAX0080", "M31-GXAXX0800"]
+        self.assertEqual(result["data"]["expansion_models"], expected)
+        self.assertEqual(probe.await_args.args[0]["expansion_models"], expected)
+
+    async def test_invalid_expansion_inventory_does_not_probe_or_save(self):
+        flow = flow_api.M31ConfigFlow()
+        with patch.object(flow_api, "_probe", AsyncMock()) as probe:
+            result = await flow.async_step_user(
+                {"host": "192.168.99.99", "expansion_models": "invalid"}
+            )
+        self.assertEqual(result["errors"], {"base": "invalid_expansions"})
+        probe.assert_not_called()
+        options = flow_api.M31OptionsFlow()
+        options.config_entry = ha_fakes.Entry()
+        with patch.object(flow_api, "_probe", AsyncMock()) as probe:
+            result = await options.async_step_init(
+                {
+                    "scan_interval": 1,
+                    "input_count": 0,
+                    "inverted_inputs": "",
+                    "expansion_models": "invalid",
+                }
+            )
+        self.assertEqual(result["errors"], {"base": "invalid_expansions"})
+        probe.assert_not_called()
+
+    async def test_options_can_replace_or_clear_initial_expansion_inventory(self):
+        entry = ha_fakes.Entry()
+        entry.data["expansion_models"] = ["GXXAX0080"]
+        for text, expected in (("GXAXX0800", ["GXAXX0800"]), ("", [])):
+            with self.subTest(inventory=text):
+                flow = flow_api.M31OptionsFlow()
+                flow.config_entry = entry
+                form = await flow.async_step_init()
+                data = form["data_schema"](
+                    {
+                        "scan_interval": 1,
+                        "input_count": 0,
+                        "inverted_inputs": "",
+                        "expansion_models": text,
+                    }
+                )
+                with patch.object(
+                    flow_api, "_probe", AsyncMock(return_value=INFO)
+                ) as probe:
+                    result = await flow.async_step_init(data)
+                self.assertEqual(result["data"]["expansion_models"], expected)
+                self.assertEqual(probe.await_args.args[0]["expansion_models"], expected)
+
+    async def test_reconfigure_keeps_options_inventory(self):
+        flow = flow_api.M31ConfigFlow()
+        flow.entry = ha_fakes.Entry(options={"expansion_models": ["GXXAX0080"]})
+        with patch.object(flow_api, "_probe", AsyncMock(return_value=INFO)) as probe:
+            result = await flow.async_step_reconfigure({"host": "192.168.99.100"})
+        self.assertEqual(result["reason"], "reconfigure_successful")
+        self.assertEqual(flow.entry.data["expansion_models"], ["GXXAX0080"])
+        self.assertEqual(probe.await_args.args[0]["expansion_models"], ["GXXAX0080"])
+
+    async def test_duplicate_endpoint_with_changed_inventory_is_not_probed(self):
+        flow = flow_api.M31ConfigFlow()
+        flow.entries = [ha_fakes.Entry()]
+        with (
+            patch.object(flow_api, "_probe", AsyncMock()) as probe,
+            self.assertRaises(ha_fakes.AbortFlow),
+        ):
+            await flow.async_step_user(
+                {
+                    "host": "192.168.99.99",
+                    "model": "M31-AAAX4440G",
+                    "expansion_models": "GXXAX0080",
+                }
+            )
+        probe.assert_not_called()
+
     async def test_legacy_model_is_saved_with_connection(self):
         flow = flow_api.M31ConfigFlow()
         data = {"host": "192.168.99.99", "model": "M31-AXXXA000G"}
@@ -253,7 +338,9 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
         )
         self.client = Mock(
             identify=AsyncMock(return_value=INFO),
-            read_state=AsyncMock(return_value=(True, False) + (False,) * 14),
+            read_io=AsyncMock(
+                return_value=io_api.IOState(di=(True, False) + (False,) * 14)
+            ),
         )
 
     async def test_setup_entities_states_inversion_unload(self):
@@ -281,6 +368,23 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.client.identify.assert_awaited_once_with(0, model_hint="M31-AXXXA000G")
         self.client.close()
 
+    async def test_startup_uses_inventory_saved_during_initial_setup(self):
+        self.entry.data["expansion_models"] = ["GXXAX0080"]
+        with patch.object(entrypoint, "M31Client", return_value=self.client):
+            await entrypoint.async_setup_entry(self.hass, self.entry)
+        self.client.identify.assert_awaited_once_with(
+            0, model_hint=None, expansion_models=("GXXAX0080",)
+        )
+        self.client.close()
+
+    async def test_empty_options_inventory_clears_initial_inventory(self):
+        self.entry.data["expansion_models"] = ["GXXAX0080"]
+        self.entry.options["expansion_models"] = []
+        with patch.object(entrypoint, "M31Client", return_value=self.client):
+            await entrypoint.async_setup_entry(self.hass, self.entry)
+        self.client.identify.assert_awaited_once_with(0, model_hint=None)
+        self.client.close()
+
     async def test_identification_failure_is_retryable_and_closes_socket(self):
         self.client.identify.side_effect = client_api.M31Error("offline")
         with (
@@ -292,7 +396,7 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.hass.config_entries.async_forward_entry_setups.assert_not_called()
 
     async def test_first_refresh_failure_closes_socket(self):
-        self.client.read_state.side_effect = client_api.M31Error("offline")
+        self.client.read_io.side_effect = client_api.M31Error("offline")
         with (
             patch.object(entrypoint, "M31Client", return_value=self.client),
             self.assertRaises(ha_fakes.ConfigEntryNotReady),
@@ -304,7 +408,7 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
         coordinator = coordinator_api.M31Coordinator(
             self.hass, self.entry, self.client, INFO
         )
-        self.client.read_state.side_effect = client_api.M31Error("bus fault")
+        self.client.read_io.side_effect = client_api.M31Error("bus fault")
         with self.assertRaises(ha_fakes.UpdateFailed):
             await coordinator._async_update_data()
 

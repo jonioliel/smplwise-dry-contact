@@ -67,7 +67,7 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
         info = await self.client.identify()
         self.assertEqual(info.input_count, 32)
         self.assertEqual(len(info.modules), 3)
-        self.assertEqual(self.server.requests[-1], (1, 2, 0, 32))
+        self.assertIn((1, 2, 0, 32), self.server.requests)
 
     async def test_inventory_crosses_frame_boundary(self):
         self.server.set_modules(["GAXXXA000-U"] * 9)
@@ -270,7 +270,7 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
                 self.server.use_legacy_register_map(count)
                 info = await self.client.identify(model_hint=model)
                 self.assertEqual(info.input_count, count)
-                self.assertEqual(self.server.requests[-1], (1, 2, 0, count))
+                self.assertIn((1, 2, 0, count), self.server.requests)
 
     async def test_legacy_auto_requests_model_selection(self):
         self.server.use_legacy_register_map()

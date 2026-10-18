@@ -1,6 +1,6 @@
-"""Small, asynchronous, read-only Modbus TCP client for EBYTE M31/M31-U.
+"""Small, asynchronous, Modbus TCP client for EBYTE M31/M31-U.
 
-This module has no Home Assistant dependencies. Only FC02 and FC03 are exposed.
+This module has no Home Assistant dependencies. FC01/02/03/04 read IO; FC05/16 write explicitly selected outputs.
 Register addresses come from M31-U V1.4 sections 4.10.1/4.10.6/4.10.7 and
 M31 Series V1.1-EN sections 4.8.1/4.8.5; addresses on the wire are zero based.
 """
@@ -10,7 +10,18 @@ from __future__ import annotations
 import asyncio
 import re
 import struct
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+
+from .errors import M31Error, ModbusError, ModelRequired, UnsupportedModel
+from .io import IOMixin
+from .models import (
+    HOST_MODELS,
+    LEGACY_HOSTS,
+    IOLayout,
+    combine,
+    model_layout,
+    parse_expansions,
+)
 
 MODEL_REGISTER = 0x0C20
 FIRMWARE_REGISTER = 0x0C2C
@@ -19,40 +30,12 @@ MODULE_REGISTER = 0x0C80
 FAULT_REGISTER = 0x7587
 # Only documented M31-U channel encodings are accepted (A means 16).
 CHANNEL_COUNTS = {str(value): value for value in range(10)} | {"A": 16}
-# The older series documents DI/health/MAC registers, but no model inventory.
-LEGACY_MODELS = {
-    "M31-AAAX4440G": 4,
-    "M31-AXXX8000G": 8,
-    "M31-AXAX4040G": 4,
-    "M31-AXXXA000G": 16,
-    "M31-AXAX8080G": 8,
-}
-
-
-class M31Error(Exception):
-    """Communication or identification failed."""
-
-
-class ModbusError(M31Error):
-    """The controller returned a Modbus exception response."""
-
-    def __init__(self, function: int, code: int) -> None:
-        self.function = function
-        self.code = code
-        super().__init__(f"Modbus function {function:02x}, exception {code:02x}")
-
-
-class UnsupportedModel(M31Error):
-    """The number of inputs cannot be determined from this model."""
-
-
-class ModelRequired(UnsupportedModel):
-    """The controller has no usable model register; ask for its model."""
+LEGACY_MODELS = {name: model_layout(name).di for name in LEGACY_HOSTS}
 
 
 @dataclass(frozen=True)
 class ControllerInfo:
-    """Stable controller identity and the configured DI count."""
+    """Stable controller identity and the configured IO inventory."""
 
     model: str
     input_count: int
@@ -60,6 +43,12 @@ class ControllerInfo:
     firmware: str | None = None
     modules: tuple[str, ...] = ()
     family: str = "m31_u"
+    layout: IOLayout | None = None
+    inventory_source: str = "host"
+
+    @property
+    def io_layout(self) -> IOLayout:
+        return self.layout or IOLayout(di=self.input_count)
 
 
 def decode_string(registers: tuple[int, ...]) -> str:
@@ -90,8 +79,8 @@ def inputs_for_module(model: str) -> int:
     return CHANNEL_COUNTS[match[1][0]]
 
 
-class M31Client:
-    """Serialize reads on one TCP connection and reconnect after failures."""
+class M31Client(IOMixin):
+    """Serialize Modbus requests on one TCP connection and reconnect after failures."""
 
     def __init__(
         self, host: str, port: int = 502, unit_id: int = 1, timeout: float = 5
@@ -106,6 +95,7 @@ class M31Client:
         self._writer: asyncio.StreamWriter | None = None
         self._transaction = 0
         self._lock = asyncio.Lock()
+        self._io_lock = asyncio.Lock()
 
     def close(self) -> None:
         """Release the socket; the next read will reconnect."""
@@ -114,8 +104,7 @@ class M31Client:
         self._reader = None
         self._writer = None
 
-    async def _read(self, function: int, address: int, count: int) -> bytes:
-        """Exchange one request, validating MBAP and the response PDU."""
+    async def _exchange(self, function: int, command: bytes) -> bytes:
         async with self._lock:
             try:
                 async with asyncio.timeout(self.timeout):
@@ -124,25 +113,24 @@ class M31Client:
                             self.host, self.port
                         )
                     self._transaction = (self._transaction + 1) & 0xFFFF
-                    transaction = self._transaction
                     self._writer.write(
                         struct.pack(
-                            ">HHHBBHH",
-                            transaction,
+                            ">HHHBB",
+                            self._transaction,
                             0,
-                            6,
+                            len(command) + 2,
                             self.unit_id,
                             function,
-                            address,
-                            count,
                         )
+                        + command
                     )
                     await self._writer.drain()
                     assert self._reader is not None
-                    header = await self._reader.readexactly(7)
-                    reply_id, protocol, length, unit = struct.unpack(">HHHB", header)
+                    reply_id, protocol, length, unit = struct.unpack(
+                        ">HHHB", await self._reader.readexactly(7)
+                    )
                     if (
-                        reply_id != transaction
+                        reply_id != self._transaction
                         or protocol != 0
                         or unit != self.unit_id
                         or not 3 <= length <= 254
@@ -153,11 +141,10 @@ class M31Client:
                         if len(pdu) != 2:
                             raise M31Error("Malformed Modbus exception")
                         raise ModbusError(function, pdu[1])
-                    if pdu[0] != function or pdu[1] != len(pdu) - 2:
-                        raise M31Error("Invalid Modbus response function or byte count")
-                    return pdu[2:]
+                    if pdu[0] != function:
+                        raise M31Error("Invalid Modbus response function")
+                    return pdu[1:]
             except ModbusError:
-                # The complete exception frame was consumed; the stream is usable.
                 raise
             except asyncio.CancelledError:
                 self.close()
@@ -170,6 +157,13 @@ class M31Client:
             ) as err:
                 self.close()
                 raise M31Error(f"Cannot read {self.host}:{self.port}: {err}") from err
+
+    async def _read(self, function: int, address: int, count: int) -> bytes:
+        payload = await self._exchange(function, struct.pack(">HH", address, count))
+        if not payload or payload[0] != len(payload) - 1:
+            self.close()
+            raise M31Error("Invalid Modbus response byte count")
+        return payload[1:]
 
     async def read_registers(self, address: int, count: int) -> tuple[int, ...]:
         """Read holding registers (FC03)."""
@@ -223,19 +217,17 @@ class M31Client:
         return tuple(modules)
 
     async def identify(
-        self, input_count: int = 0, model_hint: str | None = None
+        self,
+        input_count: int = 0,
+        model_hint: str | None = None,
+        expansion_models: tuple[str, ...] = (),
     ) -> ControllerInfo:
-        """Identify the host and validate its DI range with an actual read.
-
-        An explicit input count includes all expansion inputs in bus order.
-        The built-in IO card is slave ID 0, so the inventory already includes
-        the host inputs and must never be added to the host input count.
-        """
+        """Validate identity and every declared IO area without writing."""
         if not 0 <= input_count <= 512:
             raise ValueError("Invalid input count override")
         if model_hint:
             model = model_hint.strip().upper()
-            if model not in LEGACY_MODELS:
+            if model not in HOST_MODELS:
                 raise UnsupportedModel(f"Unsupported selected M31 model: {model!r}")
         else:
             try:
@@ -248,36 +240,51 @@ class M31Client:
                         "Select the M31 model printed on the controller"
                     ) from err
                 model = "M31 (manual)"
-            # Some older firmware returns zero-filled metadata instead of an error.
             if not model:
                 if not input_count:
                     raise ModelRequired(
                         "Select the M31 model printed on the controller"
                     )
                 model = "M31 (manual)"
-        legacy = model.upper() in LEGACY_MODELS
-        modules = ()
-        if input_count:
-            count = input_count
-        else:
-            host_count = inputs_for_model(model)
-            # The older manual does not define these M31-U inventory registers.
-            modules = () if legacy else await self._identify_modules()
+        family = (
+            "manual"
+            if model == "M31 (manual)"
+            else "m31_u"
+            if model.endswith("-U")
+            else "m31"
+        )
+        layout = IOLayout(di=input_count) if family == "manual" else model_layout(model)
+        modules, source = (), "host"
+        if expansion_models:
+            modules = parse_expansions(expansion_models)
+            if family == "manual" or any(
+                card.endswith("-U") != (family == "m31_u") for card in modules
+            ):
+                raise UnsupportedModel(
+                    "Expansion card series must match the selected controller"
+                )
+            layout += combine(modules, module=True)
+            source = "manual"
+        elif family == "m31_u" and not input_count:
+            modules = await self._identify_modules()
             if modules:
-                # Confirm slot 0 is the internal card described by the host model.
                 internal = re.sub(r"^(?:M31-)?G", "", modules[0].upper())
                 expected = model.upper().removeprefix("M31-").removesuffix("G-U") + "-U"
                 if internal != expected:
                     raise UnsupportedModel(
-                        "IO slot 0 does not match the host model; use an explicit input count"
+                        "IO slot 0 does not match the host model; configure the expansion inventory"
                     )
-                count = sum(inputs_for_module(module) for module in modules)
-            else:
-                count = host_count
-        mac = None
-        firmware = None
+                layout = combine(modules, module=True)
+                source = "auto"
+        if input_count:
+            layout = replace(layout, di=input_count)
+        if max(layout.di, layout.do, len(layout.ai), len(layout.ao), layout.pt) > 512:
+            raise UnsupportedModel("IO channel count exceeds 512 per type")
+        if not (layout.di or layout.do or layout.ai or layout.ao or layout.pt):
+            raise UnsupportedModel("No IO channels are configured")
+        mac, firmware = None, None
         metadata = [(MAC_REGISTER, 3)]
-        if not legacy and model != "M31 (manual)":
+        if family == "m31_u":
             metadata.append((FIRMWARE_REGISTER, 8))
         for address, size in metadata:
             try:
@@ -292,6 +299,8 @@ class M31Client:
                     mac = ":".join(f"{byte:02x}" for byte in raw)
             else:
                 firmware = decode_string(registers) or None
-        await self.read_state(count)
-        family = "m31" if legacy else "manual" if model == "M31 (manual)" else "m31_u"
-        return ControllerInfo(model, count, mac, firmware, modules, family)
+        info = ControllerInfo(
+            model, layout.di, mac, firmware, modules, family, layout, source
+        )
+        await self.read_io(info)
+        return info

@@ -10,11 +10,12 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 
 from .client import ControllerInfo, M31Client, M31Error
 from .const import DEFAULT_SCAN_INTERVAL, DOMAIN
+from .io import IOState
 
 _LOGGER = logging.getLogger(__name__)
 
 
-class M31Coordinator(DataUpdateCoordinator[tuple[bool, ...]]):
+class M31Coordinator(DataUpdateCoordinator[IOState]):
     """Coordinate input state and availability."""
 
     def __init__(
@@ -38,8 +39,8 @@ class M31Coordinator(DataUpdateCoordinator[tuple[bool, ...]]):
         self.info = info
         self.identity = entry.unique_id or entry.entry_id
 
-    async def _async_update_data(self) -> tuple[bool, ...]:
+    async def _async_update_data(self) -> IOState:
         try:
-            return await self.client.read_state(self.info.input_count)
+            return await self.client.read_io(self.info)
         except M31Error as err:
             raise UpdateFailed(str(err)) from err

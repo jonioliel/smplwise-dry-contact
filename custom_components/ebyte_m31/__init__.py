@@ -6,10 +6,10 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryNotReady
 
 from .client import M31Client, M31Error
-from .const import CONF_INPUT_COUNT, CONF_MODEL, CONF_UNIT_ID
+from .const import CONF_EXPANSIONS, CONF_INPUT_COUNT, CONF_MODEL, CONF_UNIT_ID
 from .coordinator import M31Coordinator
 
-PLATFORMS = [Platform.BINARY_SENSOR]
+PLATFORMS = [Platform.BINARY_SENSOR, Platform.SENSOR, Platform.SWITCH, Platform.NUMBER]
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -18,9 +18,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         entry.data[CONF_HOST], entry.data[CONF_PORT], entry.data[CONF_UNIT_ID]
     )
     try:
+        identify_options = {"model_hint": entry.data.get(CONF_MODEL)}
+        expansions = entry.options.get(
+            CONF_EXPANSIONS, entry.data.get(CONF_EXPANSIONS, ())
+        )
+        if expansions:
+            identify_options["expansion_models"] = tuple(expansions)
         info = await client.identify(
-            entry.options.get(CONF_INPUT_COUNT, 0),
-            model_hint=entry.data.get(CONF_MODEL),
+            entry.options.get(CONF_INPUT_COUNT, 0), **identify_options
         )
         coordinator = M31Coordinator(hass, entry, client, info)
         await coordinator.async_config_entry_first_refresh()

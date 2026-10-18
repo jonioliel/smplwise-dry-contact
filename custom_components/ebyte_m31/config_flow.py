@@ -13,7 +13,6 @@ from homeassistant.core import callback
 from homeassistant.data_entry_flow import FlowResult
 
 from .client import (
-    LEGACY_MODELS,
     ControllerInfo,
     M31Client,
     M31Error,
@@ -21,6 +20,7 @@ from .client import (
     UnsupportedModel,
 )
 from .const import (
+    CONF_EXPANSIONS,
     CONF_INPUT_COUNT,
     CONF_INVERTED_INPUTS,
     CONF_MODEL,
@@ -33,6 +33,7 @@ from .const import (
     MODEL_AUTO,
     NAME,
 )
+from .models import HOST_MODELS, parse_expansions
 
 
 def _connection_schema(
@@ -41,7 +42,7 @@ def _connection_schema(
     fields = {
         vol.Required(CONF_HOST, default=defaults.get(CONF_HOST, "")): str,
         vol.Required(CONF_MODEL, default=defaults.get(CONF_MODEL, MODEL_AUTO)): vol.In(
-            [MODEL_AUTO, *LEGACY_MODELS]
+            [MODEL_AUTO, *HOST_MODELS]
         ),
     }
     if advanced:
@@ -57,6 +58,14 @@ def _connection_schema(
         )
         if include_count:
             fields[
+                vol.Optional(
+                    CONF_EXPANSIONS,
+                    default=", ".join(defaults.get(CONF_EXPANSIONS, []))
+                    if isinstance(defaults.get(CONF_EXPANSIONS, []), list)
+                    else defaults.get(CONF_EXPANSIONS, ""),
+                )
+            ] = str
+            fields[
                 vol.Required(
                     CONF_INPUT_COUNT, default=defaults.get(CONF_INPUT_COUNT, 0)
                 )
@@ -69,7 +78,10 @@ async def _probe(connection: dict[str, Any], input_count: int = 0) -> Controller
         connection[CONF_HOST], connection[CONF_PORT], connection[CONF_UNIT_ID]
     )
     try:
-        return await client.identify(input_count, model_hint=connection.get(CONF_MODEL))
+        kwargs = {"model_hint": connection.get(CONF_MODEL)}
+        if connection.get(CONF_EXPANSIONS):
+            kwargs["expansion_models"] = parse_expansions(connection[CONF_EXPANSIONS])
+        return await client.identify(input_count, **kwargs)
     finally:
         client.close()
 
@@ -83,9 +95,11 @@ def _connection(data: dict[str, Any]) -> dict[str, Any]:
     }
     model = data.get(CONF_MODEL, MODEL_AUTO)
     if model != MODEL_AUTO:
-        if model not in LEGACY_MODELS:
+        if model not in HOST_MODELS:
             raise UnsupportedModel(f"Unsupported selected model: {model}")
         connection[CONF_MODEL] = model
+    if data.get(CONF_EXPANSIONS):
+        connection[CONF_EXPANSIONS] = list(parse_expansions(data[CONF_EXPANSIONS]))
     return connection
 
 
@@ -111,9 +125,16 @@ class M31ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 connection = _connection(user_input)
             except ValueError:
                 errors[CONF_HOST] = "invalid_host"
+            except UnsupportedModel:
+                errors["base"] = "invalid_expansions"
             else:
                 # Avoid probing a second copy of an already configured endpoint.
-                self._async_abort_entries_match(connection)
+                self._async_abort_entries_match(
+                    {
+                        key: connection[key]
+                        for key in (CONF_HOST, CONF_PORT, CONF_UNIT_ID)
+                    }
+                )
                 try:
                     info = await _probe(connection, user_input.get(CONF_INPUT_COUNT, 0))
                 except ModelRequired:
@@ -156,14 +177,21 @@ class M31ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         ),
                     }
                 )
+                if CONF_EXPANSIONS in entry.options:
+                    connection[CONF_EXPANSIONS] = entry.options[CONF_EXPANSIONS]
+                elif CONF_EXPANSIONS in entry.data:
+                    connection[CONF_EXPANSIONS] = entry.data[CONF_EXPANSIONS]
             except ValueError:
                 errors[CONF_HOST] = "invalid_host"
+            except UnsupportedModel:
+                errors["base"] = "invalid_expansions"
             else:
                 if any(
                     other.entry_id != entry.entry_id
                     and all(
                         other.data.get(key) == value
                         for key, value in connection.items()
+                        if key in (CONF_HOST, CONF_PORT, CONF_UNIT_ID)
                     )
                     for other in self._async_current_entries()
                 ):
@@ -207,7 +235,7 @@ def _endpoint_id(connection: dict[str, Any]) -> str:
 
 
 class M31OptionsFlow(config_entries.OptionsFlow):
-    """Adjust polling, DI count and normally closed input polarity."""
+    """Adjust polling, expansion inventory and digital input polarity."""
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
@@ -216,6 +244,22 @@ class M31OptionsFlow(config_entries.OptionsFlow):
         defaults = dict(self.config_entry.options)
         if user_input is not None:
             defaults.update(user_input)
+            try:
+                expansions = parse_expansions(
+                    user_input.get(
+                        CONF_EXPANSIONS,
+                        self.config_entry.options.get(
+                            CONF_EXPANSIONS,
+                            self.config_entry.data.get(CONF_EXPANSIONS, []),
+                        ),
+                    )
+                )
+            except UnsupportedModel:
+                return self.async_show_form(
+                    step_id="init",
+                    errors={"base": "invalid_expansions"},
+                    data_schema=self._options_schema(defaults),
+                )
             try:
                 inverted = sorted(
                     {
@@ -231,7 +275,8 @@ class M31OptionsFlow(config_entries.OptionsFlow):
             else:
                 try:
                     info = await _probe(
-                        dict(self.config_entry.data), user_input[CONF_INPUT_COUNT]
+                        {**self.config_entry.data, CONF_EXPANSIONS: list(expansions)},
+                        user_input[CONF_INPUT_COUNT],
                     )
                 except UnsupportedModel:
                     errors["base"] = "unsupported_model"
@@ -246,24 +291,32 @@ class M31OptionsFlow(config_entries.OptionsFlow):
                             data={
                                 **user_input,
                                 CONF_INVERTED_INPUTS: inverted,
+                                CONF_EXPANSIONS: list(expansions),
                             },
                         )
+        return self.async_show_form(
+            step_id="init", errors=errors, data_schema=self._options_schema(defaults)
+        )
+
+    def _options_schema(self, defaults):
         inverted_default = defaults.get(CONF_INVERTED_INPUTS, [])
         if isinstance(inverted_default, list):
             inverted_default = ", ".join(map(str, inverted_default))
-        return self.async_show_form(
-            step_id="init",
-            errors=errors,
-            data_schema=vol.Schema(
-                {
-                    vol.Required(
-                        CONF_SCAN_INTERVAL,
-                        default=defaults.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL),
-                    ): vol.All(vol.Coerce(int), vol.Range(min=1, max=300)),
-                    vol.Required(
-                        CONF_INPUT_COUNT, default=defaults.get(CONF_INPUT_COUNT, 0)
-                    ): vol.All(vol.Coerce(int), vol.Range(min=0, max=MAX_INPUTS)),
-                    vol.Required(CONF_INVERTED_INPUTS, default=inverted_default): str,
-                }
-            ),
+        expansions = defaults.get(
+            CONF_EXPANSIONS, self.config_entry.data.get(CONF_EXPANSIONS, [])
+        )
+        if not isinstance(expansions, str):
+            expansions = ", ".join(expansions)
+        return vol.Schema(
+            {
+                vol.Required(
+                    CONF_SCAN_INTERVAL,
+                    default=defaults.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL),
+                ): vol.All(vol.Coerce(int), vol.Range(min=1, max=300)),
+                vol.Required(
+                    CONF_INPUT_COUNT, default=defaults.get(CONF_INPUT_COUNT, 0)
+                ): vol.All(vol.Coerce(int), vol.Range(min=0, max=MAX_INPUTS)),
+                vol.Required(CONF_INVERTED_INPUTS, default=inverted_default): str,
+                vol.Optional(CONF_EXPANSIONS, default=expansions): str,
+            }
         )

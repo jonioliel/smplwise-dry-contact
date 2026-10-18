@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.2.0
+
+- Expand from digital inputs to all documented IO types: DI binary sensors, relay/PNP DO switches, current/voltage AI sensors, current/voltage AO number controls and M31-U PT100 sensors.
+- Cover all 26 Modbus TCP base models in the supplied M31 V1.1-EN and M31-U V1.4 catalogues, plus matching M31-G expansion card encodings, including output-only and analog-only controllers.
+- Discover the complete M31-U inventory without double-counting the internal card. Add a manual, ordered expansion model list for older M31 and firmware without inventory registers.
+- Keep channel offsets independent for DI, DO, AI, AO and PT100; preserve existing DI entity identities, inversion settings and connections.
+- Read analog engineering values, signed AI ranges and PT100 unit/diagnostic codes. Respect the live AO range before each single-channel FC16 command; use FC05 for a single DO.
+- Never write on setup, restart or polling, never change hardware range/failsafe/pulse settings, and do not retry failed writes automatically. Block commands on unavailable controllers or reported bus faults.
+- Add mixed-inventory, output command, range, fault, concurrency and configuration persistence regression tests. Document that hardware and full Home Assistant runtime validation remain outstanding.
+
 ## 1.1.0
 
 - Support the older M31 series: M31-AXXXA000G (16 DI), M31-AXXX8000G (8 DI), M31-AXAX4040G (4 DI), M31-AXAX8080G (8 DI), and M31-AAAX4440G (4 DI).
