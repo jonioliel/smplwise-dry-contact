@@ -28,6 +28,108 @@ INFO = client_api.ControllerInfo(
 
 
 class FlowTests(unittest.IsolatedAsyncioTestCase):
+    async def test_blank_options_fields_are_not_required_by_the_frontend(self):
+        flow = flow_api.M31OptionsFlow()
+        flow.config_entry = ha_fakes.Entry()
+        form = await flow.async_step_init()
+        fields = {field.schema: field for field in form["data_schema"].schema}
+        for name in ("inverted_inputs", "expansion_models"):
+            with self.subTest(field=name):
+                self.assertNotIsInstance(fields[name], flow_api.vol.Required)
+                self.assertIsInstance(fields[name], flow_api.vol.Optional)
+                self.assertIs(fields[name].default, flow_api.vol.UNDEFINED)
+
+    async def test_options_without_expansions_or_inversion_can_be_saved(self):
+        for model, count in (
+            ("M31-AXXXA000G-U", 16),
+            ("M31-AXXXA000G", 16),
+            ("M31-XXXA0008G", 0),
+        ):
+            with self.subTest(model=model):
+                flow = flow_api.M31OptionsFlow()
+                flow.config_entry = ha_fakes.Entry()
+                flow.config_entry.data["model"] = model
+                form = await flow.async_step_init()
+                # A cleared optional text field is omitted by the HA frontend.
+                data = form["data_schema"]({"scan_interval": 1, "input_count": 0})
+                info = client_api.ControllerInfo(model, count)
+                with patch.object(
+                    flow_api, "_probe", AsyncMock(return_value=info)
+                ) as probe:
+                    result = await flow.async_step_init(data)
+                self.assertEqual(result["type"], "create_entry")
+                self.assertEqual(result["data"]["inverted_inputs"], [])
+                self.assertEqual(result["data"]["expansion_models"], [])
+                self.assertEqual(probe.await_args.args[0]["expansion_models"], [])
+
+    async def test_clearing_optional_fields_does_not_restore_saved_values(self):
+        for source in ("data", "options"):
+            with self.subTest(expansions_saved_in=source):
+                flow = flow_api.M31OptionsFlow()
+                entry = ha_fakes.Entry(options={"inverted_inputs": [2, 5]})
+                getattr(entry, source)["expansion_models"] = ["GXXAX0080-U"]
+                flow.config_entry = entry
+                form = await flow.async_step_init()
+                fields = {field.schema: field for field in form["data_schema"].schema}
+                self.assertEqual(
+                    fields["inverted_inputs"].description, {"suggested_value": "2, 5"}
+                )
+                self.assertEqual(
+                    fields["expansion_models"].description,
+                    {"suggested_value": "GXXAX0080-U"},
+                )
+                data = form["data_schema"]({"scan_interval": 2, "input_count": 0})
+                with patch.object(
+                    flow_api, "_probe", AsyncMock(return_value=INFO)
+                ) as probe:
+                    result = await flow.async_step_init(data)
+                self.assertEqual(result["data"]["inverted_inputs"], [])
+                self.assertEqual(result["data"]["expansion_models"], [])
+                self.assertEqual(probe.await_args.args[0]["expansion_models"], [])
+
+    async def test_cleared_fields_stay_blank_after_a_probe_failure(self):
+        flow = flow_api.M31OptionsFlow()
+        flow.config_entry = ha_fakes.Entry(
+            options={"inverted_inputs": [2], "expansion_models": ["GXXAX0080-U"]}
+        )
+        with patch.object(
+            flow_api, "_probe", AsyncMock(side_effect=client_api.M31Error("offline"))
+        ):
+            result = await flow.async_step_init({"scan_interval": 1, "input_count": 0})
+        self.assertEqual(result["errors"], {"base": "cannot_connect"})
+        fields = {field.schema: field for field in result["data_schema"].schema}
+        for name in ("inverted_inputs", "expansion_models"):
+            self.assertEqual(fields[name].description, {"suggested_value": ""})
+
+    async def test_unchanged_suggestions_preserve_saved_lists(self):
+        flow = flow_api.M31OptionsFlow()
+        flow.config_entry = ha_fakes.Entry(
+            options={"inverted_inputs": [2, 5], "expansion_models": ["GXXAX0080-U"]}
+        )
+        form = await flow.async_step_init()
+        suggestions = {
+            field.schema: field.description["suggested_value"]
+            for field in form["data_schema"].schema
+            if field.schema in ("inverted_inputs", "expansion_models")
+        }
+        data = form["data_schema"](
+            {"scan_interval": 2, "input_count": 0, **suggestions}
+        )
+        with patch.object(flow_api, "_probe", AsyncMock(return_value=INFO)) as probe:
+            result = await flow.async_step_init(data)
+        self.assertEqual(result["data"]["inverted_inputs"], [2, 5])
+        self.assertEqual(result["data"]["expansion_models"], ["GXXAX0080-U"])
+        self.assertEqual(probe.await_args.args[0]["expansion_models"], ["GXXAX0080-U"])
+
+    async def test_initial_expansion_suggestion_can_be_cleared(self):
+        schema = flow_api._connection_schema(
+            {"host": "192.168.99.99", "expansion_models": ["GXXAX0080-U"]},
+            advanced=True,
+            include_count=True,
+        )
+        data = schema({"host": "192.168.99.99"})
+        self.assertNotIn("expansion_models", data)
+
     async def test_initial_setup_normalizes_and_saves_expansion_inventory(self):
         flow = flow_api.M31ConfigFlow()
         with patch.object(flow_api, "_probe", AsyncMock(return_value=INFO)) as probe:

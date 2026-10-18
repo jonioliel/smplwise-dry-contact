@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.2.1
+
+- Fix the options form blocking Continue when no input inversion is needed. Input inversion and expansion models are optional and can both be left blank.
+- Allow clearing saved inversion and expansion lists, including when Home Assistant omits empty optional text fields. Keep cleared values blank after validation or connection errors.
+- Show existing optional values as editable suggestions, so defaults no longer silently restore a cleared expansion list in setup or options.
+- Add regression checks for frontend-required metadata, omitted fields, both M31 families, output-only controllers, saved-list clearing and retry behavior.
+
 ## 1.2.0
 
 - Expand from digital inputs to all documented IO types: DI binary sensors, relay/PNP DO switches, current/voltage AI sensors, current/voltage AO number controls and M31-U PT100 sensors.

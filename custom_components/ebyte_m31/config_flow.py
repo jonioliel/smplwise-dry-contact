@@ -60,9 +60,11 @@ def _connection_schema(
             fields[
                 vol.Optional(
                     CONF_EXPANSIONS,
-                    default=", ".join(defaults.get(CONF_EXPANSIONS, []))
-                    if isinstance(defaults.get(CONF_EXPANSIONS, []), list)
-                    else defaults.get(CONF_EXPANSIONS, ""),
+                    description={
+                        "suggested_value": ", ".join(defaults.get(CONF_EXPANSIONS, []))
+                        if isinstance(defaults.get(CONF_EXPANSIONS, []), list)
+                        else defaults.get(CONF_EXPANSIONS, ""),
+                    },
                 )
             ] = str
             fields[
@@ -244,16 +246,18 @@ class M31OptionsFlow(config_entries.OptionsFlow):
         defaults = dict(self.config_entry.options)
         if user_input is not None:
             defaults.update(user_input)
+            # HA omits cleared optional fields. Treat them as empty, rather than
+            # restoring a saved value or requiring the frontend to send "".
+            inverted_text = user_input.get(CONF_INVERTED_INPUTS, "")
+            expansions_text = user_input.get(CONF_EXPANSIONS, "")
+            defaults.update(
+                {
+                    CONF_INVERTED_INPUTS: inverted_text,
+                    CONF_EXPANSIONS: expansions_text,
+                }
+            )
             try:
-                expansions = parse_expansions(
-                    user_input.get(
-                        CONF_EXPANSIONS,
-                        self.config_entry.options.get(
-                            CONF_EXPANSIONS,
-                            self.config_entry.data.get(CONF_EXPANSIONS, []),
-                        ),
-                    )
-                )
+                expansions = parse_expansions(expansions_text)
             except UnsupportedModel:
                 return self.async_show_form(
                     step_id="init",
@@ -264,7 +268,7 @@ class M31OptionsFlow(config_entries.OptionsFlow):
                 inverted = sorted(
                     {
                         int(number.strip())
-                        for number in user_input[CONF_INVERTED_INPUTS].split(",")
+                        for number in inverted_text.split(",")
                         if number.strip()
                     }
                 )
@@ -316,7 +320,12 @@ class M31OptionsFlow(config_entries.OptionsFlow):
                 vol.Required(
                     CONF_INPUT_COUNT, default=defaults.get(CONF_INPUT_COUNT, 0)
                 ): vol.All(vol.Coerce(int), vol.Range(min=0, max=MAX_INPUTS)),
-                vol.Required(CONF_INVERTED_INPUTS, default=inverted_default): str,
-                vol.Optional(CONF_EXPANSIONS, default=expansions): str,
+                vol.Optional(
+                    CONF_INVERTED_INPUTS,
+                    description={"suggested_value": inverted_default},
+                ): str,
+                vol.Optional(
+                    CONF_EXPANSIONS, description={"suggested_value": expansions}
+                ): str,
             }
         )

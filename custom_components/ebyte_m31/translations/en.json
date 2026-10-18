@@ -11,7 +11,7 @@
           "unit_id": "Modbus address (unit ID)",
           "input_count": "DI count override only (0 = model inventory)",
           "model": "Model (auto = automatic detection)",
-          "expansion_models": "Expansion card models in order (exclude internal card)"
+          "expansion_models": "Expansion card models in order (optional, exclude internal card)"
         }
       },
       "reconfigure": {
@@ -42,12 +42,12 @@
     "step": {
       "init": {
         "title": "IO and expansion options",
-        "description": "For manual expansion layout, list external card models in physical bus order, comma-separated, excluding the internal card. Example: GXXAX0080, GXAXX0800. An empty list uses M31-U discovery or the older M31 host alone. DI override affects digital inputs only. Inverted DI inputs are comma-separated numbers, for example 1, 3.",
+        "description": "For manual expansion layout, list external card models in physical bus order, comma-separated, excluding the internal card. Example: GXXAX0080, GXAXX0800. An empty list uses M31-U discovery or the older M31 host alone. DI override affects digital inputs only. Inverted DI inputs are comma-separated numbers, for example 1, 3. Input inversion and expansion models are optional; leave them blank when unused. Clearing a saved list removes it.",
         "data": {
           "scan_interval": "Update interval (seconds)",
           "input_count": "DI count override only (0 = model inventory)",
-          "inverted_inputs": "Inputs to invert (normally closed contacts)",
-          "expansion_models": "Expansion card models in order (exclude internal card)"
+          "inverted_inputs": "Inputs to invert (optional)",
+          "expansion_models": "Expansion card models in order (optional, exclude internal card)"
         }
       }
     },
