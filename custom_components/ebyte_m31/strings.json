@@ -1,0 +1,54 @@
+{
+  "title": "SMPLwise Dry Contact",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect SMPLwise Dry Contact",
+        "description": "Enter the controller IP. Digital inputs and supported expansion cards are detected automatically. The controller must use Modbus TCP server mode. Advanced defaults: port 502, Modbus address 1.",
+        "data": {
+          "host": "Controller IP address",
+          "port": "Modbus TCP port",
+          "unit_id": "Modbus address (unit ID)",
+          "input_count": "Total digital inputs (0 = automatic)"
+        }
+      },
+      "reconfigure": {
+        "title": "Change controller connection",
+        "description": "Enter the new connection details for the same controller. Existing entity IDs are preserved.",
+        "data": {
+          "host": "Controller IP address",
+          "port": "Modbus TCP port",
+          "unit_id": "Modbus address (unit ID)"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Cannot read the controller. Check the IP, port, Modbus address, TCP server mode, network protocol (Modbus TCP) and IO bus health.",
+      "invalid_host": "Enter a valid IP address, without http:// or a port.",
+      "unsupported_model": "Cannot determine the digital input count for this model or IO inventory. Check that this is an M31-U. You can enter the total input count in the advanced fields."
+    },
+    "abort": {
+      "already_configured": "This controller is already configured.",
+      "wrong_device": "This IP belongs to a different controller (MAC address mismatch).",
+      "reconfigure_successful": "Controller connection updated."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Digital input options",
+        "description": "0 inputs uses automatic detection. To override it, enter the total number of DI inputs across the host and all expansion cards. Inverted inputs are numbered from 1; separate numbers with commas, for example 1, 3, 16.",
+        "data": {
+          "scan_interval": "Update interval (seconds)",
+          "input_count": "Total digital inputs (0 = automatic)",
+          "inverted_inputs": "Inputs to invert (normally closed contacts)"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Cannot read the controller. Check the connection and IO bus health.",
+      "unsupported_model": "Cannot detect inputs. Enter an explicit total input count.",
+      "invalid_inputs": "Use comma-separated input numbers between 1 and the total detected input count."
+    }
+  }
+}
